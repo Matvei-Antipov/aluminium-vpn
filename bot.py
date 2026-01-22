@@ -884,7 +884,7 @@ async def delete_msg(callback: types.CallbackQuery):
     await callback.message.delete()
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "ok"}
 
