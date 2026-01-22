@@ -1,0 +1,9 @@
+aiogram>=3.0
+aiohttp
+aiocryptopay
+asyncpg
+fastapi
+uvicorn
+python-dotenv
+py3xui
+tenacity
