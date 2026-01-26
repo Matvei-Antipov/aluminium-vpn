@@ -18,7 +18,7 @@ from aiogram.filters import CommandStart, CommandObject, StateFilter, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, PreCheckoutQuery
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from py3xui import AsyncApi, Client
@@ -619,6 +619,34 @@ async def show_key_handler(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "buy_1_month")
 async def create_invoice(callback: types.CallbackQuery):
+    if db_pool is None:
+        return
+
+    if not await check_sub(callback.from_user.id):
+        return await safe_message_answer(callback.message, "🔒 Подпишитесь:", reply_markup=sub_kb())
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⭐️ Оплатить Звездами (85 ⭐️)", callback_data="pay_stars")], 
+            
+            [InlineKeyboardButton(text="💎 Оплатить Криптой ($1)", callback_data="pay_crypto")],
+            
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="start")],
+        ]
+    )
+
+    await safe_message_edit_text(
+        callback.message,
+        "💳 <b>Выберите способ оплаты</b>\n\n"
+        "⭐️ <b>Telegram Stars:</b> Оплата картой прямо в приложении.\n"
+        "💎 <b>Криптовалюта:</b> USDT, TON, BTC через CryptoPay.\n\n"
+        "<i>Стоимость: 1 месяц доступа.</i>",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+
+@dp.callback_query(F.data == "pay_crypto")
+async def create_crypto_invoice(callback: types.CallbackQuery):
     if db_pool is None or crypto is None:
         return
 
@@ -659,6 +687,84 @@ async def create_invoice(callback: types.CallbackQuery):
         logger.error("Ошибка создания счета: %s", e)
         await safe_callback_answer(callback, f"❌ Ошибка создания счета: {e}", show_alert=True)
 
+
+@dp.callback_query(F.data == "pay_stars")
+async def send_stars_invoice(callback: types.CallbackQuery):
+    await callback.message.delete()
+    await callback.message.answer_invoice(
+        title="VPN Access (30 дней)",
+        description="Быстрый и безопасный VPN. Протокол VLESS Reality + Vision.",
+        payload="vpn_month_sub",
+        provider_token="",
+        currency="XTR",
+        prices=[LabeledPrice(label="Подписка 1 мес.", amount=85)],
+        start_parameter="vpn_sub"
+    )
+
+@dp.pre_checkout_query()
+async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery):
+    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+
+@dp.message(F.successful_payment)
+async def success_payment_handler(message: types.Message):
+    if message.successful_payment.invoice_payload != "vpn_month_sub":
+        return
+
+    user_id = message.from_user.id
+    logger.info(f"💰 Получена оплата Stars от {user_id}")
+
+    if db_pool is None:
+        await message.answer("❌ Ошибка базы данных. Обратитесь к админу.")
+        return
+
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """UPDATE users 
+               SET expiry_date = GREATEST(expiry_date, NOW()) + INTERVAL '30 days'
+               WHERE user_id = $1
+               RETURNING uuid, expiry_date""",
+            user_id,
+        )
+
+        if not row:
+            await message.answer("❌ Ошибка: пользователь не найден в БД.")
+            return
+
+        expiry_time_ms = int(row["expiry_date"].timestamp() * 1000)
+        email = f"user_{user_id}"
+
+        if row["uuid"]:
+            try:
+                await update_client_via_xui_api(row["uuid"], email, expiry_time_ms)
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка обновления в X-UI: {e}")
+            
+            key = generate_vless_link(row["uuid"], email)
+        
+        else:
+            new_uuid = str(uuid.uuid4())
+            try:
+                await add_client_via_xui_api(new_uuid, email, limit_ip=1, expiry_time=expiry_time_ms)
+                
+                await conn.execute("UPDATE users SET uuid = $1 WHERE user_id = $2", new_uuid, user_id)
+            except Exception as e:
+                logger.error(f"❌ Ошибка создания в X-UI: {e}")
+                await message.answer("⚠️ Оплата прошла, но произошла ошибка активации. Напишите в поддержку.")
+                return
+            
+            key = generate_vless_link(new_uuid, email)
+
+        guide = get_guide_text(key)
+        
+      
+        
+        await safe_message_answer(
+            message,
+            guide,
+            reply_markup=back_kb(),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
 
 @dp.callback_query(F.data.startswith("check_"))
 async def check_invoice(callback: types.CallbackQuery):
