@@ -646,7 +646,7 @@ async def create_invoice(callback: types.CallbackQuery):
 
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="⭐️ Оплатить Звездами (85 ⭐️)", callback_data="pay_stars")], 
+            [InlineKeyboardButton(text="⭐️ Оплатить Звездами (100 ⭐️)", callback_data="pay_stars")], 
             
             [InlineKeyboardButton(text="💎 Оплатить Криптой ($1)", callback_data="pay_crypto")],
             
@@ -716,7 +716,7 @@ async def send_stars_invoice(callback: types.CallbackQuery):
         payload="vpn_month_sub",
         provider_token="",
         currency="XTR",
-        prices=[LabeledPrice(label="Подписка 1 мес.", amount=85)],
+        prices=[LabeledPrice(label="Подписка 1 мес.", amount=100)],
         start_parameter="vpn_sub"
     )
 
