@@ -47,6 +47,8 @@ vpn_api: AsyncApi | None = None
 
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 CHANNEL_URL = os.getenv("CHANNEL_URL")
+CHANNEL_2_ID = os.getenv("CHANNEL_2_ID")
+CHANNEL_2_URL = os.getenv("CHANNEL_2_URL")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 ADMIN_USERNAME = "matvei_dev"
 
@@ -189,13 +191,25 @@ def generate_custom_id() -> str:
 
 
 async def check_sub(user_id: int) -> bool:
-    if not CHANNEL_ID:
+    channels_to_check = []
+    if CHANNEL_ID:
+        channels_to_check.append(CHANNEL_ID)
+    if CHANNEL_2_ID:
+        channels_to_check.append(CHANNEL_2_ID)
+
+    if not channels_to_check:
         return True
-    try:
-        member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
-        return member.status not in ["left", "kicked", "banned"]
-    except Exception:
-        return True
+
+    for chat_id in channels_to_check:
+        try:
+            member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
+            if member.status in ["left", "kicked", "banned"]:
+                return False
+        except Exception as e:
+            logger.error(f"⚠️ Ошибка проверки подписки для канала {chat_id}: {e}")
+            continue
+            
+    return True
 
 
 @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, max=10), reraise=True)
@@ -422,13 +436,17 @@ def main_menu_kb(user_id: int) -> InlineKeyboardMarkup:
 
 
 def sub_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📢 Подписаться на канал", url=CHANNEL_URL)],
-            [InlineKeyboardButton(text="✅ Я подписался", callback_data="check_sub_btn")],
-        ]
-    )
+    buttons = []
 
+    if CHANNEL_URL:
+        buttons.append([InlineKeyboardButton(text="📢 Подписаться на Канал 1", url=CHANNEL_URL)])
+
+    if CHANNEL_2_URL:
+        buttons.append([InlineKeyboardButton(text="📢 Подписаться на Канал 2", url=CHANNEL_2_URL)])
+
+    buttons.append([InlineKeyboardButton(text="✅ Я подписался", callback_data="check_sub_btn")])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def back_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="start")]])
@@ -486,7 +504,7 @@ async def cmd_start(message: types.Message, command: CommandObject):
     if not await check_sub(user_id):
         return await safe_message_answer(
             message,
-            "🔒 <b>Доступ закрыт!</b>\nДля работы с ботом подпишитесь на наш канал:",
+            "🔒 <b>Доступ закрыт!</b>\nДля работы с ботом подпишитесь на наши каналы:",
             reply_markup=sub_kb(),
             parse_mode="HTML",
         )
@@ -585,7 +603,7 @@ async def show_key_handler(callback: types.CallbackQuery):
     if not await check_sub(callback.from_user.id):
         return await safe_message_edit_text(
             callback.message, 
-            "🔒 <b>Доступ закрыт!</b>\nДля работы с ботом подпишитесь на наш канал:", 
+            "🔒 <b>Доступ закрыт!</b>\nДля работы с ботом подпишитесь на наши каналы:", 
             reply_markup=sub_kb(),
             parse_mode="HTML"
         )
