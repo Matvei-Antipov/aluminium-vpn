@@ -55,6 +55,7 @@ class AdminState(StatesGroup):
     waiting_for_new_days = State()
     waiting_for_new_refs = State()
     editing_user_id = State()
+    waiting_for_search_query = State()
 
 class SupportState(StatesGroup):
     waiting_for_question = State()
@@ -999,25 +1000,67 @@ async def health_check():
 async def admin_panel_open(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
         return
+
     await state.clear()
-    await show_user_page(callback.message, page=0, is_edit=True)
+    await state.update_data(admin_search_query=None, admin_filter_active=False)
+    
+    await show_user_page(callback.message, state, page=0, is_edit=True)
 
 
-
-async def show_user_page(message_obj: types.Message, page: int, is_edit: bool = False, message_id_to_edit: int = None):
+async def show_user_page(message_obj: types.Message, state: FSMContext, page: int, is_edit: bool = False, message_id_to_edit: int = None):
     if db_pool is None:
         return
 
+    data = await state.get_data()
+    search_query = data.get("admin_search_query")
+    filter_active = data.get("admin_filter_active", False)
+
+    where_clauses = []
+    params = []
+    param_counter = 1
+
+    if filter_active:
+        where_clauses.append("expiry_date > NOW()")
+
+    if search_query:
+
+        where_clauses.append(f"(username ILIKE ${param_counter} OR CAST(user_id AS TEXT) = ${param_counter} OR custom_id = ${param_counter})")
+        params.append(search_query)
+        param_counter += 1
+
+    where_sql = " WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+
     async with db_pool.acquire() as conn:
-        total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
-        user = await conn.fetchrow("SELECT * FROM users ORDER BY user_id LIMIT 1 OFFSET $1", page)
+       
+        count_sql = f"SELECT COUNT(*) FROM users{where_sql}"
+        total_users = await conn.fetchval(count_sql, *params)
+
+        params.append(page) 
+       
+        select_sql = f"SELECT * FROM users{where_sql} ORDER BY user_id LIMIT 1 OFFSET ${param_counter}"
+        
+        user = await conn.fetchrow(select_sql, *params)
+
+    filter_status = "🔘 Все"
+    if filter_active:
+        filter_status = "🟢 Активные"
+    if search_query:
+        filter_status += f" | 🔍 Поиск: {search_query}"
 
     if not user:
-        text = "🤷‍♂️ Пользователей нет."
+        text = f"🛠 <b>Админ панель</b>\nСтатус: {filter_status}\n\n🤷‍♂️ <b>Пользователей не найдено.</b>"
+
+        buttons = []
+        if search_query or filter_active:
+             buttons.append([InlineKeyboardButton(text="❌ Сбросить фильтры", callback_data="admin_reset_filters")])
+        buttons.append([InlineKeyboardButton(text="🔙 В главное меню", callback_data="start")])
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+        
         if is_edit:
-            await safe_message_edit_text(message_obj, text)
+            await safe_message_edit_text(message_obj, text, reply_markup=kb, parse_mode="HTML")
         else:
-            await safe_message_answer(message_obj, text)
+            await safe_message_answer(message_obj, text, reply_markup=kb, parse_mode="HTML")
         return
 
     days_left = 0
@@ -1032,6 +1075,7 @@ async def show_user_page(message_obj: types.Message, page: int, is_edit: bool = 
     
     card_text = (
         f"🛠 <b>Админ панель</b>\n"
+        f"Режим: {filter_status}\n"
         f"👤 <b>Пользователь {page + 1} из {total_users}</b>\n\n"
         f"🆔 ID: <code>{user['user_id']}</code>\n"
         f"🏷 Custom ID: <code>{user['custom_id']}</code>\n"
@@ -1042,22 +1086,30 @@ async def show_user_page(message_obj: types.Message, page: int, is_edit: bool = 
     )
 
     buttons = []
+
     nav_row = []
     if page > 0:
         nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"admin_page_{page - 1}"))
     if page < total_users - 1:
         nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"admin_page_{page + 1}"))
     buttons.append(nav_row)
-    
+
     buttons.append([
         InlineKeyboardButton(text="✏️ Ред. дни", callback_data=f"admin_edit_days_{user['user_id']}_{page}"),
         InlineKeyboardButton(text="✏️ Ред. рефералов", callback_data=f"admin_edit_refs_{user['user_id']}_{page}")
     ])
+
+    filter_btn_text = "Показать только активные" if not filter_active else "Показать всех"
+    buttons.append([InlineKeyboardButton(text=f"👁 {filter_btn_text}", callback_data="admin_toggle_filter")])
+    
+    search_btn_text = "🔍 Поиск по @username / ID" if not search_query else "❌ Сбросить поиск"
+    search_callback = "admin_search_start" if not search_query else "admin_reset_filters"
+    buttons.append([InlineKeyboardButton(text=search_btn_text, callback_data=search_callback)])
+
     buttons.append([InlineKeyboardButton(text="🔙 В главное меню", callback_data="start")])
 
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
 
-   
     if message_id_to_edit:
         try:
             await bot.edit_message_text(
@@ -1068,22 +1120,69 @@ async def show_user_page(message_obj: types.Message, page: int, is_edit: bool = 
                 parse_mode="HTML"
             )
         except Exception:
-           
             await safe_message_answer(message_obj, card_text, reply_markup=kb, parse_mode="HTML")
-            
-   
     elif is_edit:
         await safe_message_edit_text(message_obj, card_text, reply_markup=kb, parse_mode="HTML")
-
     else:
         await safe_message_answer(message_obj, card_text, reply_markup=kb, parse_mode="HTML")
 
 
 @dp.callback_query(F.data.startswith("admin_page_"))
-async def admin_pagination(callback: types.CallbackQuery):
+async def admin_pagination(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID: return
     page = int(callback.data.split("_")[2])
-    await show_user_page(callback.message, page, is_edit=True)
+    await show_user_page(callback.message, state, page, is_edit=True)
+
+
+@dp.callback_query(F.data == "admin_toggle_filter")
+async def admin_toggle_filter(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: return
+    
+    data = await state.get_data()
+    current_status = data.get("admin_filter_active", False)
+    await state.update_data(admin_filter_active=not current_status)
+
+    await show_user_page(callback.message, state, page=0, is_edit=True)
+
+
+@dp.callback_query(F.data == "admin_reset_filters")
+async def admin_reset_filters(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: return
+    await state.update_data(admin_search_query=None) 
+    await show_user_page(callback.message, state, page=0, is_edit=True)
+
+
+@dp.callback_query(F.data == "admin_search_start")
+async def admin_search_start(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: return
+    
+    await safe_message_edit_text(
+        callback.message,
+        "🔍 <b>Поиск пользователя</b>\n\n"
+        "Отправьте мне:\n"
+        "• Username (например @durov)\n"
+        "• Telegram ID (цифры)\n"
+        "• Custom ID из бота",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Отмена", callback_data="admin_panel")]]),
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminState.waiting_for_search_query)
+
+
+@dp.message(StateFilter(AdminState.waiting_for_search_query))
+async def admin_perform_search(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    
+    query = message.text.strip()
+    if query.startswith("@"):
+        query = query[1:]
+        
+    await message.delete()
+
+    await state.update_data(admin_search_query=query)
+    await state.set_state(None) 
+    
+    await show_user_page(message, state, page=0, is_edit=False)
 
 
 @dp.callback_query(F.data.startswith("admin_edit_days_"))
@@ -1170,7 +1269,7 @@ async def admin_save_days(message: types.Message, state: FSMContext):
     await state.clear()
     
 
-    await show_user_page(message, page, is_edit=False, message_id_to_edit=panel_msg_id)
+    await show_user_page(message, state, page, is_edit=False, message_id_to_edit=panel_msg_id)
 
 
 
@@ -1222,7 +1321,7 @@ async def admin_save_refs(message: types.Message, state: FSMContext):
             await conn.execute("UPDATE users SET referral_count=$1 WHERE user_id=$2", new_count, target_user_id)
 
     await state.clear()
-    await show_user_page(message, page, is_edit=False, message_id_to_edit=panel_msg_id)
+    await show_user_page(message, state, page, is_edit=False, message_id_to_edit=panel_msg_id)
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
