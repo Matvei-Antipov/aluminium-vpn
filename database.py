@@ -27,5 +27,6 @@ async def init_db() -> None:
             await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_count INTEGER DEFAULT 0;")
             await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_support_time TIMESTAMP;")
             await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_bonus_claim TIMESTAMP;")
+            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS expired_notification_sent BOOLEAN DEFAULT FALSE;")
         except Exception:
             pass

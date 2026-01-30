@@ -4,6 +4,10 @@ import random
 import string
 import uuid
 import logging
+import hmac
+import hashlib
+import json
+import aiohttp
 from datetime import datetime, timedelta
 
 from aiocryptopay import AioCryptoPay, Networks
@@ -82,7 +86,6 @@ async def process_referral_reward(referrer_id: int) -> None:
                 await safe_bot_send_message(referrer_id, "🎉 <b>Бонус (5 друзей)!</b>\nВам добавлено 3 дня VPN!", parse_mode="HTML")
             except: pass
 
-
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, command: CommandObject):
     if not database.db_pool: return
@@ -94,9 +97,16 @@ async def cmd_start(message: types.Message, command: CommandObject):
         if not user:
             custom_id = generate_custom_id()
             referrer_id: int | None = None
-            if command.args and command.args.isdigit() and int(command.args) != user_id:
-                ref_check = await conn.fetchval("SELECT user_id FROM users WHERE user_id = $1", int(command.args))
-                if ref_check: referrer_id = int(command.args)
+            
+            if command.args:
+                ref_row = await conn.fetchrow("SELECT user_id FROM users WHERE custom_id = $1", command.args)
+                if ref_row:
+                    found_id = ref_row["user_id"]
+                    if found_id != user_id:
+                        referrer_id = found_id
+                elif command.args.isdigit() and int(command.args) != user_id:
+                    ref_check = await conn.fetchval("SELECT user_id FROM users WHERE user_id = $1", int(command.args))
+                    if ref_check: referrer_id = int(command.args)
             
             await conn.execute("INSERT INTO users (user_id, username, custom_id, referrer_id) VALUES ($1, $2, $3, $4)", user_id, username, custom_id, referrer_id)
             if referrer_id:
@@ -109,6 +119,47 @@ async def cmd_start(message: types.Message, command: CommandObject):
         return await safe_message_answer(message, "🔒 <b>Доступ закрыт!</b>\nДля работы с ботом подпишитесь на наши каналы:", reply_markup=kb.sub_kb(), parse_mode="HTML")
 
     await safe_message_answer(message, "👋 <b>Добро пожаловать в VPN Shop!</b>", reply_markup=kb.main_menu_kb(user_id), parse_mode="HTML")
+
+@dp.callback_query(F.data == "profile")
+async def profile_handler(callback: types.CallbackQuery):
+    if not database.db_pool: return
+    if not await check_sub(callback.from_user.id): return await safe_message_answer(callback.message, "🔒 Подпишитесь:", reply_markup=kb.sub_kb())
+
+    user_id = callback.from_user.id
+    async with database.db_pool.acquire() as conn:
+        user = await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", user_id)
+
+    if not user: return await safe_callback_answer(callback, "Ошибка данных", show_alert=True)
+
+    status_emoji = "❌"
+    status_text = "Не активен"
+    
+    if user["expiry_date"] and user["expiry_date"] > datetime.now():
+        delta = user["expiry_date"] - datetime.now()
+        days_left = delta.days
+        hours_left = int(delta.seconds // 3600)
+        status_emoji = "✅"
+        status_text = f"Активен ({days_left} дн. {hours_left} ч.)"
+
+    bot_info = await bot.get_me()
+    ref_link = f"https://t.me/{bot_info.username}?start={user['custom_id']}"
+
+    text = (
+        "👤 <b>Личный кабинет</b>\n\n"
+        f"🆔 ID: <code>{user['custom_id']}</code>\n"
+        f"📡 VPN: {status_emoji} {status_text}\n\n"
+        f"👥 <b>Рефералы:</b> {user['referral_count']}\n"
+        "🎁 <i>3 дня VPN за каждые 5 друзей!</i>\n\n"
+        "🔗 <b>Ссылка для друзей:</b>\n"
+        f"<code>{ref_link}</code>"
+    )
+    
+    buttons = []
+    if user["expiry_date"] and user["expiry_date"] > datetime.now() and user["uuid"]:
+        buttons.append([InlineKeyboardButton(text="👁 Показать ключ доступа", callback_data="show_key")])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="start")])
+    
+    await safe_message_edit_text(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
 
 @dp.callback_query(F.data == "daily_bonus")
 async def get_daily_bonus(callback: types.CallbackQuery):
@@ -129,8 +180,8 @@ async def get_daily_bonus(callback: types.CallbackQuery):
                 return await safe_callback_answer(callback, f"⏳ Бонус доступен раз в 24 часа.\nЖдать: {hours} ч. {minutes} мин.", show_alert=True)
 
         chance = random.randint(1, 100)
-        if chance <= 60: hours_reward = random.randint(1, 12)
-        elif chance <= 90: hours_reward = random.randint(13, 24)
+        if chance <= 90: hours_reward = random.randint(1, 12)
+        elif chance <= 99: hours_reward = random.randint(13, 24)
         else: hours_reward = random.randint(25, 72)
 
         if user["expiry_date"] and user["expiry_date"] > datetime.now():
@@ -195,44 +246,39 @@ async def cb_start(callback: types.CallbackQuery, state: FSMContext):
     except:
         await safe_message_answer(callback.message, "👋 Главное меню", reply_markup=kb.main_menu_kb(callback.from_user.id))
 
-@dp.callback_query(F.data == "profile")
-async def profile_handler(callback: types.CallbackQuery):
+@dp.message(CommandStart())
+async def cmd_start(message: types.Message, command: CommandObject):
     if not database.db_pool: return
-    if not await check_sub(callback.from_user.id): return await safe_message_answer(callback.message, "🔒 Подпишитесь:", reply_markup=kb.sub_kb())
+    user_id = message.from_user.id
+    username = message.from_user.username
 
-    user_id = callback.from_user.id
     async with database.db_pool.acquire() as conn:
-        user = await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", user_id)
+        user = await conn.fetchrow("SELECT user_id FROM users WHERE user_id = $1", user_id)
+        if not user:
+            custom_id = generate_custom_id()
+            referrer_id: int | None = None
+            
+            if command.args:
+                ref_row = await conn.fetchrow("SELECT user_id FROM users WHERE custom_id = $1", command.args)
+                if ref_row:
+                    found_id = ref_row["user_id"]
+                    if found_id != user_id:
+                        referrer_id = found_id
+                elif command.args.isdigit() and int(command.args) != user_id:
+                    ref_check = await conn.fetchval("SELECT user_id FROM users WHERE user_id = $1", int(command.args))
+                    if ref_check: referrer_id = int(command.args)
+            
+            await conn.execute("INSERT INTO users (user_id, username, custom_id, referrer_id) VALUES ($1, $2, $3, $4)", user_id, username, custom_id, referrer_id)
+            if referrer_id:
+                asyncio.create_task(process_referral_reward(referrer_id))
+                try:
+                    await safe_bot_send_message(referrer_id, f"👤 <b>Новый реферал!</b>\n@{username if username else user_id}", parse_mode="HTML")
+                except: pass
 
-    if not user: return await safe_callback_answer(callback, "Ошибка данных", show_alert=True)
+    if not await check_sub(user_id):
+        return await safe_message_answer(message, "🔒 <b>Доступ закрыт!</b>\nДля работы с ботом подпишитесь на наши каналы:", reply_markup=kb.sub_kb(), parse_mode="HTML")
 
-    days_left = 0
-    status_emoji = "❌"
-    status_text = "Не активен"
-    if user["expiry_date"] and user["expiry_date"] > datetime.now():
-        days_left = (user["expiry_date"] - datetime.now()).days
-        status_emoji = "✅"
-        status_text = f"Активен ({days_left} дн.)"
-
-    bot_info = await bot.get_me()
-    ref_link = f"https://t.me/{bot_info.username}?start={user_id}"
-
-    text = (
-        "👤 <b>Личный кабинет</b>\n\n"
-        f"🆔 ID: <code>{user['custom_id']}</code>\n"
-        f"📡 VPN: {status_emoji} {status_text}\n\n"
-        f"👥 <b>Рефералы:</b> {user['referral_count']}\n"
-        "🎁 <i>3 дня VPN за каждые 5 друзей!</i>\n\n"
-        "🔗 <b>Ссылка для друзей:</b>\n"
-        f"<code>{ref_link}</code>"
-    )
-    
-    buttons = []
-    if user["expiry_date"] and user["expiry_date"] > datetime.now() and user["uuid"]:
-        buttons.append([InlineKeyboardButton(text="👁 Показать ключ доступа", callback_data="show_key")])
-    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="start")])
-    
-    await safe_message_edit_text(callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+    await safe_message_answer(message, "👋 <b>Добро пожаловать в VPN Shop!</b>", reply_markup=kb.main_menu_kb(user_id), parse_mode="HTML")
 
 @dp.callback_query(F.data == "show_key")
 async def show_key_handler(callback: types.CallbackQuery):
@@ -251,7 +297,24 @@ async def show_key_handler(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "buy_1_month")
 async def create_invoice(callback: types.CallbackQuery):
-    if not await check_sub(callback.from_user.id): return
+    await callback.answer()
+
+    if not await check_sub(callback.from_user.id):
+        try:
+            await safe_message_edit_text(
+                callback.message, 
+                "🔒 <b>Ошибка доступа!</b>\nДля покупки VPN необходимо подписаться на наши каналы:", 
+                reply_markup=kb.sub_kb(), 
+                parse_mode="HTML"
+            )
+        except:
+            await safe_message_answer(
+                callback.message, 
+                "🔒 <b>Ошибка доступа!</b>\nДля покупки VPN необходимо подписаться на наши каналы:", 
+                reply_markup=kb.sub_kb(), 
+                parse_mode="HTML"
+            )
+        return
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⭐️ Оплатить Звездами (100 ⭐️)", callback_data="pay_stars")], 
@@ -273,8 +336,10 @@ async def create_invoice(callback: types.CallbackQuery):
             reply_markup=keyboard, 
             parse_mode="HTML"
         )
-    except TelegramBadRequest:
-        await callback.message.delete()
+    except Exception:
+        try: await callback.message.delete()
+        except: pass
+        
         await safe_message_answer(
             callback.message, 
             text, 
@@ -336,7 +401,10 @@ async def success_payment_handler(message: types.Message):
     if not database.db_pool: return
 
     async with database.db_pool.acquire() as conn:
-        row = await conn.fetchrow("UPDATE users SET expiry_date = GREATEST(expiry_date, NOW()) + INTERVAL '30 days' WHERE user_id = $1 RETURNING uuid, expiry_date", user_id)
+        row = await conn.fetchrow(
+            "UPDATE users SET expiry_date = GREATEST(expiry_date, NOW()) + INTERVAL '30 days', expired_notification_sent = FALSE WHERE user_id = $1 RETURNING uuid, expiry_date", 
+            user_id
+        )
         expiry_ms = int(row["expiry_date"].timestamp() * 1000)
         email = f"user_{user_id}"
 
@@ -364,7 +432,10 @@ async def check_invoice(callback: types.CallbackQuery):
         await safe_callback_answer(callback, "✅ Оплата получена! Генерируем ключ...", show_alert=True)
         user_id = callback.from_user.id
         async with database.db_pool.acquire() as conn:
-             row = await conn.fetchrow("UPDATE users SET expiry_date = GREATEST(expiry_date, NOW()) + INTERVAL '30 days' WHERE user_id = $1 RETURNING uuid, expiry_date", user_id)
+             row = await conn.fetchrow(
+                "UPDATE users SET expiry_date = GREATEST(expiry_date, NOW()) + INTERVAL '30 days', expired_notification_sent = FALSE WHERE user_id = $1 RETURNING uuid, expiry_date", 
+                user_id
+            )
              expiry_ms = int(row["expiry_date"].timestamp() * 1000)
              email = f"user_{user_id}"
              
@@ -481,6 +552,124 @@ async def delete_msg(callback: types.CallbackQuery):
 async def admin_panel_open(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID: return
     await state.clear()
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Управление пользователями", callback_data="admin_users_list")],
+        [InlineKeyboardButton(text="📢 Создать объявление", callback_data="admin_create_announce")],
+        [InlineKeyboardButton(text="🔙 В главное меню", callback_data="start")]
+    ])
+
+    await safe_message_edit_text(
+        callback.message,
+        "🛠 <b>Админ панель</b>\n\nВыберите действие:",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+
+
+@dp.callback_query(F.data == "admin_create_announce")
+async def ask_announcement_text(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: return
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Отмена", callback_data="admin_panel")]
+    ])
+    
+  
+    await safe_message_edit_text(
+        callback.message, 
+        "✍️ <b>Введите текст объявления:</b>\n\n"
+        "Вы можете использовать HTML разметку (жирный, ссылки и т.д.).\n"
+        "Помните: сообщение уйдет <u>ВСЕМ</u> пользователям бота.", 
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    
+  
+    await state.update_data(announce_msg_id=callback.message.message_id)
+    await state.set_state(AdminState.waiting_for_announcement_text)
+
+
+@dp.message(StateFilter(AdminState.waiting_for_announcement_text))
+async def broadcast_announcement(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    
+   
+    data = await state.get_data()
+    menu_msg_id = data.get("announce_msg_id")
+    
+  
+    try:
+        if menu_msg_id:
+            await bot.edit_message_text(
+                "⏳ <b>Рассылка запущена...</b>\nЭто может занять некоторое время.",
+                chat_id=message.chat.id,
+                message_id=menu_msg_id,
+                parse_mode="HTML"
+            )
+        else:
+            
+            msg = await message.answer("⏳ <b>Рассылка запущена...</b>", parse_mode="HTML")
+            menu_msg_id = msg.message_id
+    except Exception:
+        pass
+
+    if not database.db_pool: 
+        await message.answer("❌ Ошибка базы данных")
+        await state.clear()
+        return
+
+    count_success = 0
+    count_blocked = 0
+
+    async with database.db_pool.acquire() as conn:
+        users = await conn.fetch("SELECT user_id FROM users")
+        
+    for row in users:
+        user_id = row['user_id']
+        try:
+           
+            await message.send_copy(chat_id=user_id)
+            count_success += 1
+        except Exception:
+            count_blocked += 1
+        
+        await asyncio.sleep(0.05)
+
+  
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 В админ панель", callback_data="admin_panel")]
+    ])
+    
+    result_text = (
+        f"✅ <b>Объявление разослано!</b>\n\n"
+        f"📨 Получили: {count_success}\n"
+        f"🚫 Заблокировали бота: {count_blocked}"
+    )
+
+    try:
+        await bot.edit_message_text(
+            result_text,
+            chat_id=message.chat.id,
+            message_id=menu_msg_id,
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+    except Exception:
+       
+        await message.answer(result_text, reply_markup=kb, parse_mode="HTML")
+        
+    await state.clear()
+
+@dp.callback_query(F.data == "admin_users_list")
+async def admin_users_list(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID: return
+   
     await state.update_data(admin_search_query=None, admin_filter_active=False)
     await show_user_page(callback.message, state, page=0, is_edit=True)
 
@@ -507,7 +696,7 @@ async def show_user_page(message_obj: types.Message, state: FSMContext, page: in
              text = f"🛠 <b>Админ панель</b>\nСтатус: {'🔍 Поиск: ' + search_query if search_query else 'Все'}\n\n🤷‍♂️ <b>Пользователей не найдено.</b>"
              bts = []
              if search_query or filter_active: bts.append([InlineKeyboardButton(text="❌ Сбросить фильтры", callback_data="admin_reset_filters")])
-             bts.append([InlineKeyboardButton(text="🔙 В главное меню", callback_data="start")])
+             bts.append([InlineKeyboardButton(text="🔙 Назад в меню", callback_data="admin_panel")])
              markup = InlineKeyboardMarkup(inline_keyboard=bts)
 
              if message_id_to_edit:
@@ -521,17 +710,18 @@ async def show_user_page(message_obj: types.Message, state: FSMContext, page: in
              return
 
         params.append(page)
-        user = await conn.fetchrow(f"SELECT * FROM users{where_sql} ORDER BY user_id LIMIT 1 OFFSET ${idx}", *params)
+        user = await conn.fetchrow(f"SELECT user_id, custom_id, username, referral_count, expiry_date, uuid FROM users{where_sql} ORDER BY user_id LIMIT 1 OFFSET ${idx}", *params)
 
     status_str = "🔘 Все"
     if filter_active: status_str = "🟢 Активные"
     if search_query: status_str += f" | 🔍 {search_query}"
 
-    days_left = 0
     status_text = "🔴 Не активен"
     if user["expiry_date"] and user["expiry_date"] > datetime.now():
-        days_left = (user["expiry_date"] - datetime.now()).days
-        status_text = f"🟢 Активен ({days_left} дн.)"
+        delta = user["expiry_date"] - datetime.now()
+        days_left = delta.days
+        hours_left = int(delta.seconds // 3600)
+        status_text = f"🟢 Активен ({days_left} дн. {hours_left} ч.)"
     elif user["expiry_date"]:
         status_text = "🔴 Истек"
 
@@ -558,7 +748,7 @@ async def show_user_page(message_obj: types.Message, state: FSMContext, page: in
     search_btn = "🔍 Поиск по @username / ID" if not search_query else "❌ Сбросить поиск"
     search_cb = "admin_search_start" if not search_query else "admin_reset_filters"
     rows.append([InlineKeyboardButton(text=search_btn, callback_data=search_cb)])
-    rows.append([InlineKeyboardButton(text="🔙 В главное меню", callback_data="start")])
+    rows.append([InlineKeyboardButton(text="🔙 Назад в меню", callback_data="admin_panel")])
 
     markup = InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -649,7 +839,7 @@ async def admin_save_days(message: types.Message, state: FSMContext):
         user = await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", uid)
         base = user["expiry_date"] if user["expiry_date"] and user["expiry_date"] > datetime.now() else datetime.now()
         new_d = base + timedelta(days=days) if days != 0 else datetime.now()
-        await conn.execute("UPDATE users SET expiry_date=$1 WHERE user_id=$2", new_d, uid)
+        await conn.execute("UPDATE users SET expiry_date=$1, expired_notification_sent = FALSE WHERE user_id=$2", new_d, uid)
         if user["uuid"]: await xui_api.update_client_via_xui_api(user["uuid"], f"user_{uid}", int(new_d.timestamp()*1000))
 
     await state.clear()
@@ -680,6 +870,40 @@ async def admin_save_refs(message: types.Message, state: FSMContext):
     await state.clear()
     await show_user_page(message, state, data["return_page"], is_edit=False, message_id_to_edit=data["panel_msg_id"])
 
+async def check_expired_subscriptions():
+    """Фоновая задача: проверяет истекшие подписки и шлет уведомления."""
+    while True:
+        try:
+            if database.db_pool:
+                async with database.db_pool.acquire() as conn:
+                    rows = await conn.fetch(
+                        "SELECT user_id FROM users WHERE expiry_date < NOW() AND (expired_notification_sent IS FALSE OR expired_notification_sent IS NULL)"
+                    )
+                    
+                    for row in rows:
+                        user_id = row["user_id"]
+                        
+                      
+                        kb_renew = InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="💳 Продлить подписку", callback_data="buy_1_month")]
+                        ])
+                        
+                        try:
+                            await safe_bot_send_message(
+                                user_id,
+                                "⛔️ <b>Ваша подписка истекла!</b>\n\n"
+                                "VPN отключен. Чтобы продолжить пользоваться интернетом без ограничений, пожалуйста, продлите подписку.",
+                                reply_markup=kb_renew,
+                                parse_mode="HTML"
+                            )
+                            await conn.execute("UPDATE users SET expired_notification_sent = TRUE WHERE user_id = $1", user_id)
+                        except Exception as e:
+                            await conn.execute("UPDATE users SET expired_notification_sent = TRUE WHERE user_id = $1", user_id)
+
+        except Exception as e:
+            logger.error(f"Ошибка в чекере подписок: {e}")
+        
+        await asyncio.sleep(300)
 
 async def main():
     global crypto
@@ -687,6 +911,8 @@ async def main():
     
     await xui_api.init_vpn_api()
     await database.init_db()
+
+    asyncio.create_task(check_expired_subscriptions())
 
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("🚀 Бот запущен (Polling)")

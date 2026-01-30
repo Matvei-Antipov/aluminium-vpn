@@ -5,6 +5,7 @@ class AdminState(StatesGroup):
     waiting_for_new_refs = State()
     editing_user_id = State()
     waiting_for_search_query = State()
+    waiting_for_announcement_text = State()
 
 class SupportState(StatesGroup):
     waiting_for_question = State()
