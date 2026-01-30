@@ -682,7 +682,12 @@ async def show_user_page(message_obj: types.Message, state: FSMContext, page: in
     where = []
     params = []
     idx = 1
-    if filter_active: where.append("expiry_date > NOW()")
+
+    if filter_active: 
+        where.append(f"expiry_date > ${idx}")
+        params.append(datetime.now())
+        idx += 1
+
     if search_query:
         where.append(f"(username ILIKE ${idx} OR CAST(user_id AS TEXT) = ${idx} OR custom_id = ${idx})")
         params.append(search_query)
@@ -837,10 +842,43 @@ async def admin_save_days(message: types.Message, state: FSMContext):
     
     async with database.db_pool.acquire() as conn:
         user = await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", uid)
-        base = user["expiry_date"] if user["expiry_date"] and user["expiry_date"] > datetime.now() else datetime.now()
-        new_d = base + timedelta(days=days) if days != 0 else datetime.now()
-        await conn.execute("UPDATE users SET expiry_date=$1, expired_notification_sent = FALSE WHERE user_id=$2", new_d, uid)
-        if user["uuid"]: await xui_api.update_client_via_xui_api(user["uuid"], f"user_{uid}", int(new_d.timestamp()*1000))
+        
+        if days == 0:
+            new_d = datetime.now() - timedelta(minutes=1)
+        else:
+            base = user["expiry_date"] if user["expiry_date"] and user["expiry_date"] > datetime.now() else datetime.now()
+            new_d = base + timedelta(days=days)
+
+        if user["uuid"]: 
+            try:
+                await xui_api.update_client_via_xui_api(user["uuid"], f"user_{uid}", int(new_d.timestamp()*1000))
+            except Exception as e:
+                logger.error(f"X-UI Update Error: {e}")
+
+        notification_sent = False
+        
+        if new_d < datetime.now():
+            try:
+                kb_renew = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="💳 Продлить подписку", callback_data="buy_1_month")]
+                ])
+                await safe_bot_send_message(
+                    uid,
+                    "⛔️ <b>Ваша подписка истекла!</b>\n\n"
+                    "VPN отключен. Чтобы продолжить пользоваться интернетом без ограничений, пожалуйста, продлите подписку.",
+                    reply_markup=kb_renew,
+                    parse_mode="HTML"
+                )
+                notification_sent = True 
+            except Exception:
+                notification_sent = True 
+        else:
+            notification_sent = False 
+
+        await conn.execute(
+            "UPDATE users SET expiry_date=$1, expired_notification_sent=$2 WHERE user_id=$3", 
+            new_d, notification_sent, uid
+        )
 
     await state.clear()
     await show_user_page(message, state, data["return_page"], is_edit=False, message_id_to_edit=data["panel_msg_id"])
