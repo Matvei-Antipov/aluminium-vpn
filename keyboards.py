@@ -5,6 +5,7 @@ def main_menu_kb(user_id: int) -> InlineKeyboardMarkup:
     kb = [
         [InlineKeyboardButton(text="⚡️ Купить VPN (1 мес - $1)", callback_data="buy_1_month")],
         [InlineKeyboardButton(text="🎁 Ежедневный бонус", callback_data="daily_bonus")],
+        [InlineKeyboardButton(text="📜 Правила и Оферта", callback_data="legal_menu")],
         [
             InlineKeyboardButton(text="👤 Профиль", callback_data="profile"),
             InlineKeyboardButton(text="🆘 Поддержка", callback_data="support"),

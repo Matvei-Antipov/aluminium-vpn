@@ -120,6 +120,81 @@ async def cmd_start(message: types.Message, command: CommandObject):
 
     await safe_message_answer(message, "👋 <b>Добро пожаловать в VPN Shop!</b>", reply_markup=kb.main_menu_kb(user_id), parse_mode="HTML")
 
+
+@dp.callback_query(F.data == "legal_menu")
+async def open_legal_menu(callback: types.CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📞 Контакты", callback_data="legal_contacts")],
+        [InlineKeyboardButton(text="💸 Политика возврата", callback_data="legal_refund")],
+        [InlineKeyboardButton(text="📄 Публичная оферта", callback_data="legal_offer")],
+        [InlineKeyboardButton(text="🔒 Политика конфиденциальности", callback_data="legal_privacy")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
+    ])
+    
+    await safe_message_edit_text(
+        callback.message,
+        "📜 <b>Правовая информация</b>\n\n"
+        "Выберите интересующий вас раздел:",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+
+@dp.callback_query(F.data == "legal_contacts")
+async def show_contacts(callback: types.CallbackQuery):
+    await safe_callback_answer(callback)
+    text = (
+        "📞 <b>Контакты</b>\n\n"
+        "Служба поддержки пользователей:\n"
+        f"Telegram: @{ADMIN_USERNAME}\n" 
+        "Email: aluminium.vpn@gmail.com\n\n" 
+        "Время работы: 10:00 - 22:00 (МСК)"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="legal_menu")]])
+    await safe_message_edit_text(callback.message, text, reply_markup=kb, parse_mode="HTML")
+
+@dp.callback_query(F.data == "legal_refund")
+async def show_refund_policy(callback: types.CallbackQuery):
+    await safe_callback_answer(callback)
+    text = (
+        "💸 <b>Политика возврата</b>\n\n"
+        "1. Пользователь может потребовать возврат денежных средств за товар при условии его неисправности по вине магазина или при невыдаче товара в сроки до 48 часов.\n\n"
+        "2. Возврат денежных средств осуществляется на реквизиты пользователя, с которых производилась оплата.\n\n"
+        "3. Возврат и замена товаров возможны только при условии неисправности самих товаров по вине магазина. (Если пользователь передумал, не понравился товар и т.д., то возврат и замена не предусмотрены.)\n\n"
+        "4. Рассмотрение заявки и возврат средств осуществляется в течение 72 часов с момента обращения пользователя в поддержку магазина.\n\n"
+        "5. Срок для подачи на возврат 72 часа по истечению срока на выдачу товара.\n\n"
+        "6. Возврат средств осуществляется только с помощью технической поддержки телеграмм бота."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="legal_menu")]])
+    await safe_message_edit_text(callback.message, text, reply_markup=kb, parse_mode="HTML")
+
+@dp.callback_query(F.data == "legal_offer")
+async def show_public_offer(callback: types.CallbackQuery):
+    await safe_callback_answer(callback)
+    text = (
+        "📄 <b>Публичная оферта</b>\n\n"
+        "Настоящая оферта является официальным предложением сервиса AluminiumVPN заключить договор купли-продажи услуг доступа к частной сети (VPN) дистанционным способом.\n\n"
+        "<b>1. Предмет договора:</b> Предоставление Пользователю ключа доступа к серверам VPN.\n"
+        "<b>2. Момент заключения:</b> Оплата услуг Пользователем означает безоговорочное принятие данной оферты.\n"
+        "<b>3. Обязанности:</b> Сервис обязуется предоставить рабочий ключ доступа после оплаты. Пользователь обязуется не использовать сервис для противоправных действий.\n\n"
+        "<i>Полный текст оферты предоставляется по запросу.</i>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="legal_menu")]])
+    await safe_message_edit_text(callback.message, text, reply_markup=kb, parse_mode="HTML")
+
+@dp.callback_query(F.data == "legal_privacy")
+async def show_privacy_policy(callback: types.CallbackQuery):
+    await safe_callback_answer(callback)
+    text = (
+        "🔒 <b>Политика конфиденциальности</b>\n\n"
+        "Мы уважаем вашу анонимность и придерживаемся политики отсутствия логов (No-Logs Policy).\n\n"
+        "<b>1. Сбор данных:</b> Мы храним только ваш Telegram ID для активации подписки. Мы НЕ собираем ФИО, номера телефонов или данные карт.\n"
+        "<b>2. Использование данных:</b> Ваш ID используется исключительно для автоматической выдачи ключей доступа и технической поддержки.\n"
+        "<b>3. История посещений:</b> Мы не ведем, не храним и не передаем третьим лицам логи вашего интернет-трафика.\n"
+        "<b>4. Безопасность:</b> Все соединения зашифрованы современными протоколами."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="legal_menu")]])
+    await safe_message_edit_text(callback.message, text, reply_markup=kb, parse_mode="HTML")
+
 @dp.callback_query(F.data == "profile")
 async def profile_handler(callback: types.CallbackQuery):
     if not database.db_pool: return
