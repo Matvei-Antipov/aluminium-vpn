@@ -3,11 +3,7 @@ import os
 import random
 import string
 import uuid
-import logging
-import hmac
-import hashlib
-import json
-import aiohttp
+import time
 from datetime import datetime, timedelta
 
 from aiocryptopay import AioCryptoPay, Networks
@@ -17,7 +13,6 @@ from aiogram.filters import CommandStart, CommandObject, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, PreCheckoutQuery
 
-import config
 from config import bot, dp, logger, ADMIN_ID, ADMIN_USERNAME, CHANNEL_ID, CHANNEL_2_ID
 import database
 import xui_api
@@ -27,6 +22,8 @@ from utils import (
     safe_message_answer, safe_message_edit_text, safe_bot_send_message,
     safe_callback_answer, get_guide_text
 )
+from lava_pay import create_lava_invoice, check_lava_status
+
 
 crypto: AioCryptoPay | None = None
 
@@ -392,6 +389,7 @@ async def create_invoice(callback: types.CallbackQuery):
         return
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Картой РФ (100₽)", callback_data="pay_lava")],
         [InlineKeyboardButton(text="⭐️ Оплатить Звездами (100 ⭐️)", callback_data="pay_stars")], 
         [InlineKeyboardButton(text="💎 Оплатить Криптой ($1)", callback_data="pay_crypto")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
@@ -421,6 +419,117 @@ async def create_invoice(callback: types.CallbackQuery):
             reply_markup=keyboard, 
             parse_mode="HTML"
         )
+
+@dp.callback_query(F.data == "pay_lava")
+async def pay_lava_handler(callback: types.CallbackQuery):
+    if not database.db_pool: return
+    
+    short_time = int(time.time()) % 1000000
+    order_id = f"{callback.from_user.id}-{short_time}"
+
+    result = await create_lava_invoice(amount=100.00, order_id=order_id)
+
+    if not result or result.get("status") == "error":
+        logger.error(f"Lava Error: {result}")
+        msg = result.get("message", "Ошибка")
+        return await safe_callback_answer(callback, f"❌ Ошибка Lava: {msg}", show_alert=True)
+
+    data_obj = result.get("data")
+    if not data_obj:
+        logger.error(f"Lava No Data: {result}")
+        return await safe_callback_answer(callback, "❌ Ошибка получения ссылки.", show_alert=True)
+
+    url = data_obj["url"]
+    invoice_id = data_obj["id"]
+
+    check_data = f"L_{invoice_id}_{order_id}"
+    
+    if len(check_data.encode('utf-8')) > 64:
+        check_data = f"L_{invoice_id}"
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔗 Оплатить 100₽", url=url)],
+            [InlineKeyboardButton(text="🔄 Я оплатил", callback_data=check_data)],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="buy_1_month")],
+        ]
+    )
+    
+    await safe_message_edit_text(
+        callback.message,
+        f"💳 <b>Оплата картой (Lava)</b>\n\n"
+        f"Сумма: <b>100 RUB</b>\n"
+        f"Заказ: <code>{order_id}</code>\n\n"
+        f"❗️ Нажмите <b>«Оплатить»</b>, совершите перевод, затем нажмите <b>«Я оплатил»</b>.",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+
+@dp.callback_query(F.data.startswith("L_"))
+async def check_lava_handler(callback: types.CallbackQuery):
+    if not database.db_pool: return
+    
+    parts = callback.data.split("_")
+    invoice_id = parts[1]
+    
+    order_id = parts[2] if len(parts) > 2 else "unknown"
+    
+    result = await check_lava_status(order_id, invoice_id)
+    
+    status_code = result.get("status")
+    data_obj = result.get("data", {})
+    inner_status = data_obj.get("status") if data_obj else None
+    
+    is_paid = (status_code == 200 or status_code == "success") and (
+        inner_status == 1 or 
+        inner_status == "completed" or 
+        inner_status == "paid" or 
+        inner_status == "success"
+    )
+    
+    if is_paid:
+        await safe_callback_answer(callback, "✅ Оплата найдена! Выдаем VPN...", show_alert=True)
+
+        user_id = callback.from_user.id
+        async with database.db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """UPDATE users 
+                   SET expiry_date = GREATEST(expiry_date, NOW()) + INTERVAL '30 days',
+                       expired_notification_sent = FALSE
+                   WHERE user_id = $1
+                   RETURNING uuid, expiry_date""",
+                user_id,
+            )
+            
+            if row:
+                expiry_ms = int(row["expiry_date"].timestamp() * 1000)
+                email = f"user_{user_id}"
+                
+                if row["uuid"]:
+                    try:
+                        await xui_api.update_client_via_xui_api(row["uuid"], email, expiry_ms)
+                    except: pass
+                    key = xui_api.generate_vless_link(row["uuid"], email)
+                else:
+                    new_uuid = str(uuid.uuid4())
+                    try:
+                        await xui_api.add_client_via_xui_api(new_uuid, email, limit_ip=1, expiry_time=expiry_ms)
+                        await conn.execute("UPDATE users SET uuid = $1 WHERE user_id = $2", new_uuid, user_id)
+                    except: pass
+                    key = xui_api.generate_vless_link(new_uuid, email)
+                
+                await safe_message_edit_text(
+                    callback.message,
+                    get_guide_text(key),
+                    reply_markup=kb.back_kb(),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True
+                )
+            else:
+                 await safe_callback_answer(callback, "❌ Ошибка базы данных.", show_alert=True)
+    else:
+        logger.info(f"Check status failed: {result}")
+        await safe_callback_answer(callback, "⏳ Оплата еще не поступила. Попробуйте через минуту.", show_alert=True)
 
 @dp.callback_query(F.data == "pay_crypto")
 async def create_crypto_invoice(callback: types.CallbackQuery):
